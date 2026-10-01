@@ -11,42 +11,27 @@ fn get_hyprland_socket_path() -> String {
     return format!("{xdg_runtime_dir}/hypr/{hyprland_instance_signature}/.socket2.sock");
 }
 
-fn find_steam_app_id(socket_message: String) -> Option<String> {
-    let mut msg_parts = socket_message.split(',');
-    match (msg_parts.next(), msg_parts.next(), msg_parts.next()) {
-        (Some(_), Some(_), Some(steam_app_id_with_prefix), ..) => {
-            let mut app_id_parts = steam_app_id_with_prefix.split('_');
-            match (app_id_parts.next(), app_id_parts.next(), app_id_parts.next()) {
-                (Some("steam"), Some("app"), Some(steam_app_id), ..) => {
-                    return Some(steam_app_id.to_owned());
-                },
-                _ => println!("Failed to find steam app id"),
-            }
-        }
-        _ => println!("Failed to find steam app id"),
-    }
-    return None
-}
-
-fn proc_has_string_in_args(proc: &Process, matcher: String) -> bool {
+fn proc_has_string_in_args(proc: &Process) -> bool {
     match proc.cmd() {
         [_one, steam_launch_command, app_id, ..] => {
             return steam_launch_command.to_string_lossy().contains("SteamLaunch") &&
-                app_id.to_string_lossy().contains(&matcher)
+                app_id.to_string_lossy().contains("AppId=")
         },
         _ => return false,
     }
 }
 
-fn find_pid_for_steam_app_id(steam_app_id: String) -> Option<Pid> {
+fn find_pids_for_steam_apps() -> Vec<Pid> {
     let sys = System::new_all();
-    let steam_launch_string = format!("AppId={}", steam_app_id);
+    let mut matched_pids = Vec::new();
+
     for (_, process) in sys.processes() {
-        if proc_has_string_in_args(process, steam_launch_string.clone()) {
-            return Some(process.pid());
+        if proc_has_string_in_args(process) {
+            matched_pids.push(process.pid());
         }
     }
-    return None;
+
+    return matched_pids;
 }
 
 fn add_gamemode_to_pid(pid: String) {
@@ -59,23 +44,17 @@ fn add_gamemode_to_pid(pid: String) {
         },
         Err(err) => eprintln!("Gamemode errored lookup up pid {} with ({})", pid, err),
     }
+
     println!("Activating gamemode for pid {}", pid);
+
     let mut child = Command::new("gamemoded").arg(format!("-r{}", pid)).spawn().expect("failed to attach gamemode, HINT: is it installed");
     child.wait().expect("Gamemode didn't attach correctly");
 }
 
-fn check_if_steam_app_and_add_gamemode(socket_message: String) {
-    match find_steam_app_id(socket_message.clone()) {
-        Some(steam_app_id) => {
-            match find_pid_for_steam_app_id(steam_app_id.clone()) {
-                Some(pid) => {
-                    println!("Found pid {} to register for steam app {}", pid, steam_app_id);
-                    add_gamemode_to_pid(pid.to_string());
-                },
-                _ => println!("Failed for {}", socket_message.clone()),
-            }
-        },
-        None => {println!("statement {} didn't result in match", socket_message)},
+fn check_for_steam_apps_and_add_gamemode() {
+    for pid in find_pids_for_steam_apps() {
+        println!("Found game process with pid {}", pid);
+        add_gamemode_to_pid(pid.to_string());
     }
 }
 
@@ -83,9 +62,9 @@ fn filter_steam_apps_and_attach_gamemode(stream: UnixStream) {
     let stream = BufReader::new(stream);
     for line in stream.lines() {
         match line.unwrap() {
-            s if s.contains("openwindow>>") && s.contains("steam_app_") => {
-                println!("checking open window {}", s);
-                check_if_steam_app_and_add_gamemode(s);
+            s if s.contains("fullscreen>>") => {
+                println!("A window has toggled its fullscreen state");
+                check_for_steam_apps_and_add_gamemode();
             },
             _ => (),
         }
