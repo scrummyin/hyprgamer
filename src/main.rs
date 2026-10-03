@@ -1,39 +1,16 @@
 use std::env;
-use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 
-use sysinfo::{System, Pid, Process};
+use jqr::run;
+
+const JQ_FILTER_FULLSCREEN_GET_PID: &str = ".[] | select(.fullscreen != 0) | .pid";
 
 fn get_hyprland_socket_path() -> String {
     let xdg_runtime_dir = env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR expected to be set");
     let hyprland_instance_signature = env::var("HYPRLAND_INSTANCE_SIGNATURE").expect("HYPRLAND_INSTANCE_SIGNATURE expected to be set");
     return format!("{xdg_runtime_dir}/hypr/{hyprland_instance_signature}/.socket2.sock");
-}
-
-fn proc_has_string_in_args(proc: &Process) -> bool {
-    let join_character = OsStr::new(" ");
-    match proc.cmd() {
-        [] => return false,
-        [rest @ ..] => {
-            let cmd_str = rest.join(join_character);
-            return cmd_str.to_string_lossy().contains("SteamLaunch AppId=");
-        }
-    };
-}
-
-fn find_pids_for_steam_apps() -> Vec<Pid> {
-    let sys = System::new_all();
-    let mut matched_pids = Vec::new();
-
-    for (_, process) in sys.processes() {
-        if proc_has_string_in_args(process) {
-            matched_pids.push(process.pid());
-        }
-    }
-
-    return matched_pids;
 }
 
 fn add_gamemode_to_pid(pid: String) {
@@ -53,20 +30,34 @@ fn add_gamemode_to_pid(pid: String) {
     child.wait().expect("Gamemode didn't attach correctly");
 }
 
-fn check_for_steam_apps_and_add_gamemode() {
-    for pid in find_pids_for_steam_apps() {
+fn get_fullscreened_pids() -> Vec<String> {
+    match Command::new("hyprctl").arg("clients").arg("-j").output() {
+        Ok(output) => {
+            let output_str = std::str::from_utf8(&output.stdout).expect("hyprctl output is not valid UTF-8");
+            let results = run(JQ_FILTER_FULLSCREEN_GET_PID, output_str).expect("Failed to parse json output");
+            return results.into_iter().map(|x| x.to_string()).collect();
+        }
+        Err(err) => {
+            eprintln!("hyprctl lookup failed {}", err)
+        }
+    }
+    Vec::new()
+}
+
+fn check_for_fullscreen_apps_and_add_gamemode() {
+    for pid in get_fullscreened_pids() {
         println!("Found game process with pid {}", pid);
         add_gamemode_to_pid(pid.to_string());
     }
 }
 
-fn filter_steam_apps_and_attach_gamemode(stream: UnixStream) {
+fn trigger_gamemode_on_fullscreen_toggles(stream: UnixStream) {
     let stream = BufReader::new(stream);
     for line in stream.lines() {
         match line.unwrap() {
             s if s.contains("fullscreen>>") => {
                 println!("A window has toggled its fullscreen state");
-                check_for_steam_apps_and_add_gamemode();
+                check_for_fullscreen_apps_and_add_gamemode();
             },
             _ => (),
         }
@@ -79,7 +70,7 @@ fn main() -> std::io::Result<()> {
     let _socket = match UnixStream::connect(socket_path) {
         Ok(stream) => {
             println!("Listening to hyprland socket");
-            filter_steam_apps_and_attach_gamemode(stream)
+            trigger_gamemode_on_fullscreen_toggles(stream)
         }
         Err(err) => {
             return Err(err);
