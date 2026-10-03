@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
@@ -12,13 +13,14 @@ fn get_hyprland_socket_path() -> String {
 }
 
 fn proc_has_string_in_args(proc: &Process) -> bool {
+    let join_character = OsStr::new(" ");
     match proc.cmd() {
-        [_one, steam_launch_command, app_id, ..] => {
-            return steam_launch_command.to_string_lossy().contains("SteamLaunch") &&
-                app_id.to_string_lossy().contains("AppId=")
-        },
-        _ => return false,
-    }
+        [] => return false,
+        [rest @ ..] => {
+            let cmd_str = rest.join(join_character);
+            return cmd_str.to_string_lossy().contains("SteamLaunch AppId=");
+        }
+    };
 }
 
 fn find_pids_for_steam_apps() -> Vec<Pid> {
